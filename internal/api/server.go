@@ -139,6 +139,20 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, max int64, v interface{}
 		}
 		return false
 	}
+	// A request body must contain exactly one JSON value. Decoder.Decode only
+	// consumes the leading value, so a second Decode must hit EOF; anything
+	// else (a trailing value or stray bytes) is malformed JSON and must be
+	// rejected rather than silently processing the leading value.
+	var extra json.RawMessage
+	if err := dec.Decode(&extra); err != io.EOF {
+		switch {
+		case maxBytesError(err):
+			writeError(w, r, CodePayloadTooLarge, "request body too large")
+		default:
+			writeError(w, r, CodeInvalidJSON, "invalid JSON: unexpected trailing data")
+		}
+		return false
+	}
 	return true
 }
 

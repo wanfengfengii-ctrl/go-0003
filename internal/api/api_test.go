@@ -170,6 +170,68 @@ func TestAPITestModeGating(t *testing.T) {
 	}
 }
 
+// TestAPIRejectsMalformedJSON guards the documented error contract: a body that
+// is not exactly one JSON value must be rejected with INVALID_JSON rather than
+// silently processing the leading value. json.Decoder.Decode only consumes the
+// first value, so trailing data (a second value or stray bytes) used to be
+// accepted. Valid requests, the size limit and unknown-field rejection must be
+// preserved.
+func TestAPIRejectsMalformedJSON(t *testing.T) {
+	f := newAPIFixture(t, false)
+	tgt := mustCreateTarget(t, f)
+
+	// Trailing data after a valid object must be rejected, not processed.
+	trailing := [][]byte{
+		[]byte(`{"url":"http://x/y","secret":"s"}garbage`),
+		[]byte(`{"url":"http://x/y","secret":"s"}{"a":1}`),
+		[]byte(`{"url":"http://x/y","secret":"s"}  {"b":2}`),
+	}
+	for i, body := range trailing {
+		code, b, _ := f.do("POST", "/v1/targets", body, nil)
+		if code != 400 || errCode(b) != "INVALID_JSON" {
+			t.Fatalf("trailing case %d: got %d %s, want 400 INVALID_JSON", i, code, b)
+		}
+	}
+
+	// Completely broken JSON is still rejected with INVALID_JSON.
+	code, b, _ := f.do("POST", "/v1/targets", []byte(`{not json`), nil)
+	if code != 400 || errCode(b) != "INVALID_JSON" {
+		t.Fatalf("broken json: got %d %s, want 400 INVALID_JSON", code, b)
+	}
+
+	// PATCH with trailing data must not mutate the target.
+	code, b, _ = f.do("PATCH", "/v1/targets/"+tgt, []byte(`{"url":"http://updated/y"}extra`), nil)
+	if code != 400 || errCode(b) != "INVALID_JSON" {
+		t.Fatalf("patch trailing: got %d %s, want 400 INVALID_JSON", code, b)
+	}
+	code, b, _ = f.do("GET", "/v1/targets/"+tgt, nil, nil)
+	if code != 200 {
+		t.Fatalf("get target after rejected patch: %d %s", code, b)
+	}
+	var resp map[string]interface{}
+	json.Unmarshal(b, &resp)
+	if resp["url"] == "http://updated/y" {
+		t.Fatalf("target url mutated despite rejected patch: %v", resp["url"])
+	}
+
+	// Replay and batch replay decode the body before touching the store, so
+	// trailing data is rejected before any state change.
+	code, b, _ = f.do("POST", "/v1/dead/"+tgt+"/replay", []byte(`{"operation_key":"k"}extra`), nil)
+	if code != 400 || errCode(b) != "INVALID_JSON" {
+		t.Fatalf("replay trailing: got %d %s, want 400 INVALID_JSON", code, b)
+	}
+	code, b, _ = f.do("POST", "/v1/dead/replay", []byte(`{"target_id":"t","operation_key":"k"}extra`), nil)
+	if code != 400 || errCode(b) != "INVALID_JSON" {
+		t.Fatalf("replay batch trailing: got %d %s, want 400 INVALID_JSON", code, b)
+	}
+
+	// Preserved: a clean, valid request is still accepted.
+	code, b, _ = f.do("POST", "/v1/targets", []byte(`{"url":"http://ok/y","secret":"s"}`), nil)
+	if code != 201 {
+		t.Fatalf("valid create: got %d %s, want 201", code, b)
+	}
+}
+
 func TestAPISubmitAndDispatch(t *testing.T) {
 	f := newAPIFixture(t, true)
 	// Target points at a closed port so deliveries fail fast (retryable).
