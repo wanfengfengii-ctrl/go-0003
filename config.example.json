@@ -1,0 +1,16 @@
+{
+  "db_path": "courierbox.db",
+  "addr": ":8080",
+  "test_mode": false,
+  "global_concurrency": 16,
+  "default_target_concurrency": 4,
+  "base_delay": "1s",
+  "max_delay": "5m",
+  "max_attempts": 25,
+  "retry_after_max": "1m",
+  "http_timeout": "30s",
+  "max_response_body": 8192,
+  "max_payload_size": 1048576,
+  "poll_interval": "200ms",
+  "shutdown_timeout": "30s"
+}

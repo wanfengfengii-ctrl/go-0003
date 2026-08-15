@@ -1,0 +1,19 @@
+# Build artifacts
+bin/
+*.test
+*.out
+
+# Local databases
+*.db
+*.db-*
+courierbox.db
+
+# Editor/OS files
+.DS_Store
+*.swp
+*~
+
+# Docker build context noise
+Dockerfile*
+!*benzhi.Dockerfile
+docker-compose*.yml
