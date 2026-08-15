@@ -139,6 +139,18 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, max int64, v interface{}
 		}
 		return false
 	}
+	var extra json.RawMessage
+	if err := dec.Decode(&extra); err != io.EOF {
+		switch {
+		case maxBytesError(err):
+			writeError(w, r, CodePayloadTooLarge, "request body too large")
+		case err == nil:
+			writeError(w, r, CodeInvalidJSON, "invalid JSON: request body must contain a single JSON value")
+		default:
+			writeError(w, r, CodeInvalidJSON, "invalid JSON: "+err.Error())
+		}
+		return false
+	}
 	return true
 }
 

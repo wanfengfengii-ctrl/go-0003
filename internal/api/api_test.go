@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -11,14 +12,26 @@ import (
 	"courierbox/internal/api"
 	"courierbox/internal/clock"
 	"courierbox/internal/engine"
+	"courierbox/internal/model"
 	"courierbox/internal/store"
 )
 
+type countingStore struct {
+	store.Store
+	createTargetCalls int
+}
+
+func (s *countingStore) CreateTarget(ctx context.Context, target *model.Target) error {
+	s.createTargetCalls++
+	return s.Store.CreateTarget(ctx, target)
+}
+
 type apiFixture struct {
-	srv    *httptest.Server
-	store  *store.SQLiteStore
-	clk    *clock.Manual
-	client *http.Client
+	srv           *httptest.Server
+	store         *store.SQLiteStore
+	countingStore *countingStore
+	clk           *clock.Manual
+	client        *http.Client
 }
 
 func newAPIFixture(t *testing.T, testMode bool) *apiFixture {
@@ -29,11 +42,12 @@ func newAPIFixture(t *testing.T, testMode bool) *apiFixture {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { s.Close() })
-	eng := engine.New(s, clk, engine.Config{TestMode: testMode, MaxAttempts: 3})
-	srv := api.New(s, eng, clk, api.Config{TestMode: testMode, MaxPayloadSize: 64})
+	counting := &countingStore{Store: s}
+	eng := engine.New(counting, clk, engine.Config{TestMode: testMode, MaxAttempts: 3})
+	srv := api.New(counting, eng, clk, api.Config{TestMode: testMode, MaxPayloadSize: 64})
 	h := httptest.NewServer(srv.Handler())
 	t.Cleanup(h.Close)
-	return &apiFixture{srv: h, store: s, clk: clk, client: &http.Client{Timeout: 5 * time.Second}}
+	return &apiFixture{srv: h, store: s, countingStore: counting, clk: clk, client: &http.Client{Timeout: 5 * time.Second}}
 }
 
 func (f *apiFixture) do(method, path string, body []byte, headers map[string]string) (int, []byte, http.Header) {
@@ -130,6 +144,36 @@ func TestAPIErrorCodes(t *testing.T) {
 	code, b, _ = f.do("POST", "/v1/targets/"+tgt+"/events", big, map[string]string{"Idempotency-Key": "k"})
 	if code != 413 || errCode(b) != "PAYLOAD_TOO_LARGE" {
 		t.Fatalf("oversized: %d %s", code, b)
+	}
+}
+
+func TestCreateTargetRejectsTrailingJSON(t *testing.T) {
+	valid := []byte(`{"url":"http://x","secret":"s"}`)
+	tests := []struct {
+		name        string
+		body        []byte
+		wantStatus  int
+		wantCode    string
+		wantCreates int
+	}{
+		{name: "valid object", body: valid, wantStatus: http.StatusCreated, wantCreates: 1},
+		{name: "trailing garbage", body: append(append([]byte(nil), valid...), []byte("garbage")...), wantStatus: http.StatusBadRequest, wantCode: "INVALID_JSON"},
+		{name: "additional JSON value", body: append(append([]byte(nil), valid...), []byte(` {}`)...), wantStatus: http.StatusBadRequest, wantCode: "INVALID_JSON"},
+		{name: "unknown field", body: []byte(`{"url":"http://x","secret":"s","extra":true}`), wantStatus: http.StatusBadRequest, wantCode: "UNKNOWN_FIELD"},
+		{name: "oversized body", body: bytes.Repeat([]byte(" "), 65), wantStatus: http.StatusRequestEntityTooLarge, wantCode: "PAYLOAD_TOO_LARGE"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newAPIFixture(t, false)
+			status, body, _ := f.do(http.MethodPost, "/v1/targets", tt.body, nil)
+			if status != tt.wantStatus || (tt.wantCode != "" && errCode(body) != tt.wantCode) {
+				t.Errorf("response = %d %s, want status %d code %q", status, body, tt.wantStatus, tt.wantCode)
+			}
+			if got := f.countingStore.createTargetCalls; got != tt.wantCreates {
+				t.Errorf("CreateTarget calls = %d, want %d", got, tt.wantCreates)
+			}
+		})
 	}
 }
 
